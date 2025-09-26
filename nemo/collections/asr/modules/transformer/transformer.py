@@ -311,6 +311,78 @@ class TransformerDecoderNMAdapter(TransformerDecoderNM, adapter_mixins.AdapterMo
         cfg = adapter_utils.update_adapter_cfg_input_dim(self, cfg, module_dim=self._hidden_size)
         return cfg
 
+import einops
+from nemo.collections.asr.parts.submodules.discrete_diffusion_scheduler import get_noise_scheduler
+class TransformerDecoderDDMS(TransformerDecoderNM):
+    DECODER_TYPE: type = TransformerDecoder
+
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        num_layers: int,
+        inner_size: int,
+        num_attention_heads: int,
+        max_sequence_length: int = 512,
+        num_token_types: int = 2,
+        embedding_dropout: float = 0.0,
+        learn_positional_encodings: bool = False,
+        ffn_dropout: float = 0.0,
+        attn_score_dropout: float = 0.0,
+        attn_layer_dropout: float = 0.0,
+        hidden_act: str = 'relu',
+        pre_ln: bool = False,
+        pre_ln_final_layer_norm: bool = True,
+        cfg = None
+    ):
+        super().__init__(
+            vocab_size, hidden_size, num_layers, inner_size, num_attention_heads, max_sequence_length, num_token_types, embedding_dropout,
+            learn_positional_encodings, ffn_dropout, attn_score_dropout, attn_layer_dropout, hidden_act, pre_ln, pre_ln_final_layer_norm
+        )
+
+        self.noise_schedule = get_noise_scheduler(cfg)
+
+    def _prepare_decoder_input_and_target(self, token_ids,):
+
+        time = self.noise_schedule.sample_time(batch_size=token_ids.size(0), device=token_ids.device, time_min=self.time_min, time_max=self.time_max)
+        dalpha_t, alpha_t, sigma_t = self.noise_schedule.compute_noise_parameters(time)
+        
+        mask_prob = 1 - alpha_t
+        mask_prob = einops.repeat(mask_prob, 'b -> b t', t = token_ids.size(1))
+        will_mask = torch.bernoulli(mask_prob).to(dtype=torch.bool).to(token_ids.device)
+
+        return token_ids
+    
+    def forward(
+        self,
+        input_ids,
+        decoder_mask,
+        encoder_embeddings,
+        encoder_mask,
+        decoder_mems=None,
+    ):
+        start_pos = 0
+        if decoder_mems is not None:
+            start_pos = input_ids.shape[1] - 1
+            input_ids = input_ids[:, -1:]
+            decoder_mask = decoder_mask[:, -1:]
+            decoder_mems = torch.transpose(decoder_mems, 0, 1)
+        
+        # Modify the input_ids by masking out some of the tokens
+        input_ids = self._prepare_decoder_input_and_target(input_ids)
+        decoder_embeddings = self._embedding(input_ids=input_ids, start_pos=start_pos)
+        decoder_hidden_states = self._decoder(
+            decoder_states=decoder_embeddings,
+            decoder_mask=decoder_mask,
+            encoder_states=encoder_embeddings,
+            encoder_mask=encoder_mask,
+            decoder_mems_list=decoder_mems,
+            return_mems=self.return_mems,
+            return_mems_as_list=False,
+        )
+        if self.return_mems:
+            decoder_hidden_states = torch.transpose(decoder_hidden_states, 0, 1)
+        return decoder_hidden_states
 
 """
 Register any additional information
