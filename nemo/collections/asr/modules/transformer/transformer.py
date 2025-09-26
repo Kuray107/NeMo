@@ -20,7 +20,7 @@ from omegaconf.omegaconf import MISSING, DictConfig
 
 from nemo.collections.asr.modules.transformer.decoder_module import DecoderModule
 from nemo.collections.asr.modules.transformer.encoder_module import EncoderModule
-from nemo.collections.asr.modules.transformer.transformer_decoders import TransformerDecoder, TransformerDecoderAdapter
+from nemo.collections.asr.modules.transformer.transformer_decoders import TransformerDecoder, TransformerDecoderAdapter, TransformerDecoderDDMS
 from nemo.collections.asr.modules.transformer.transformer_encoders import TransformerEncoder
 from nemo.collections.asr.modules.transformer.transformer_modules import TransformerEmbedding
 from nemo.collections.asr.parts.submodules.adapters.attention_adapter_mixin import AttentionAdapterModuleMixin
@@ -342,7 +342,7 @@ class TransformerDecoderDDMSNM(TransformerDecoderNM):
 
         self.noise_schedule = get_noise_scheduler(cfg)
 
-    def _prepare_decoder_input_and_target(self, token_ids,):
+    def _prepare_decoder_input_and_target(self, token_ids):
 
         time = self.noise_schedule.sample_time(batch_size=token_ids.size(0), device=token_ids.device, time_min=self.time_min, time_max=self.time_max)
         dalpha_t, alpha_t, sigma_t = self.noise_schedule.compute_noise_parameters(time)
@@ -362,6 +362,7 @@ class TransformerDecoderDDMSNM(TransformerDecoderNM):
         decoder_mems=None,
     ):
         start_pos = 0
+        breakpoint()
         if decoder_mems is not None:
             start_pos = input_ids.shape[1] - 1
             input_ids = input_ids[:, -1:]

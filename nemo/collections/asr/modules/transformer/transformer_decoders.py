@@ -313,6 +313,26 @@ class TransformerDecoderAdapter(TransformerDecoder, adapter_mixins.AdapterModule
         cfg = adapter_utils.update_adapter_cfg_input_dim(self, cfg, module_dim=self.d_model)
         return cfg
 
+class TransformerDecoderDDMS(TransformerDecoder):
+    def __init__(
+        self,
+        num_layers: int,
+        hidden_size: int,
+        inner_size: int,
+        num_attention_heads: int = 1,
+        attn_score_dropout: float = 0.0,
+        attn_layer_dropout: float = 0.0,
+        ffn_dropout: float = 0.0,
+        hidden_act: str = "relu",
+        pre_ln: bool = False,
+        pre_ln_final_layer_norm: bool = True,
+    ):
+        super().__init__(
+            num_layers, hidden_size, inner_size, num_attention_heads, attn_score_dropout,
+            attn_layer_dropout, ffn_dropout, hidden_act, pre_ln, pre_ln_final_layer_norm
+        )
+
+        self.dianonal = None
 
 """
 Register any additional information
