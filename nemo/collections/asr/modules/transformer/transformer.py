@@ -313,8 +313,8 @@ class TransformerDecoderNMAdapter(TransformerDecoderNM, adapter_mixins.AdapterMo
 
 import einops
 from nemo.collections.asr.parts.submodules.discrete_diffusion_scheduler import get_noise_scheduler
-class TransformerDecoderDDMS(TransformerDecoderNM):
-    DECODER_TYPE: type = TransformerDecoder
+class TransformerDecoderDDMSNM(TransformerDecoderNM):
+    DECODER_TYPE: type = TransformerDecoderDDMS
 
     def __init__(
         self,
