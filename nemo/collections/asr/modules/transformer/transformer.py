@@ -344,14 +344,13 @@ class TransformerDecoderDDMSNM(TransformerDecoderNM):
 
     def _prepare_decoder_input_and_target(self, token_ids):
 
-        time = self.noise_schedule.sample_time(batch_size=token_ids.size(0), device=token_ids.device, time_min=self.time_min, time_max=self.time_max)
-        dalpha_t, alpha_t, sigma_t = self.noise_schedule.compute_noise_parameters(time)
-        
-        mask_prob = 1 - alpha_t
+        time = self.noise_schedule.sample_time(batch_size=token_ids.size(0), device=token_ids.device)
+        mask_prob = 1 - time
         mask_prob = einops.repeat(mask_prob, 'b -> b t', t = token_ids.size(1))
         will_mask = torch.bernoulli(mask_prob).to(dtype=torch.bool).to(token_ids.device)
+        masked_token_ids = torch.where(will_mask, 0, token_ids)
 
-        return token_ids
+        return masked_token_ids
     
     def forward(
         self,
@@ -362,7 +361,6 @@ class TransformerDecoderDDMSNM(TransformerDecoderNM):
         decoder_mems=None,
     ):
         start_pos = 0
-        breakpoint()
         if decoder_mems is not None:
             start_pos = input_ids.shape[1] - 1
             input_ids = input_ids[:, -1:]
