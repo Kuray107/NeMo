@@ -42,3 +42,4 @@ from nemo.collections.asr.models.ssl_models import (
     SpeechEncDecSelfSupervisedModel,
 )
 from nemo.collections.asr.models.transformer_bpe_models import EncDecTransfModelBPE
+from nemo.collections.asr.models.transformer_ddms_bpe_models import EncDecTransfDDMSModelBPE
