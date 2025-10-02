@@ -20,7 +20,7 @@ from omegaconf.omegaconf import MISSING, DictConfig
 
 from nemo.collections.asr.modules.transformer.decoder_module import DecoderModule
 from nemo.collections.asr.modules.transformer.encoder_module import EncoderModule
-from nemo.collections.asr.modules.transformer.transformer_decoders import TransformerDecoder, TransformerDecoderAdapter
+from nemo.collections.asr.modules.transformer.transformer_decoders import TransformerDecoder, TransformerDecoderAdapter, TransformerDecoderNonCausal
 from nemo.collections.asr.modules.transformer.transformer_encoders import TransformerEncoder
 from nemo.collections.asr.modules.transformer.transformer_modules import TransformerEmbedding
 from nemo.collections.asr.parts.submodules.adapters.attention_adapter_mixin import AttentionAdapterModuleMixin
@@ -284,6 +284,10 @@ class TransformerDecoderNM(DecoderModule, Exportable):
             return {"last_hidden_states": NeuralType(('B', 'D', 'T', 'D'), ChannelType())}
         else:
             return {"last_hidden_states": NeuralType(('B', 'T', 'D'), ChannelType())}
+
+
+class TransformerDecoderDDMSNM(TransformerDecoderNM):
+    DECODER_TYPE: type = TransformerDecoderNonCausal
 
 
 class TransformerDecoderNMAdapter(TransformerDecoderNM, adapter_mixins.AdapterModuleMixin):

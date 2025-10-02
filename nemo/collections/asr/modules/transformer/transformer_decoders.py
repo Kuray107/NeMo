@@ -313,7 +313,7 @@ class TransformerDecoderAdapter(TransformerDecoder, adapter_mixins.AdapterModule
         cfg = adapter_utils.update_adapter_cfg_input_dim(self, cfg, module_dim=self.d_model)
         return cfg
 
-class TransformerDecoderDDMS(TransformerDecoder):
+class TransformerDecoderNonCausal(TransformerDecoder):
     def __init__(
         self,
         num_layers: int,
