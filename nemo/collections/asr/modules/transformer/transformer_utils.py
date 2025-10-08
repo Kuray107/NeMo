@@ -115,7 +115,6 @@ def get_nemo_transformer(
     else:
 
         if cfg.get('dec_type') == 'ddms':
-            breakpoint()
             model = TransformerDecoderDDMSNM(
                 vocab_size=cfg.get('vocab_size'),
                 hidden_size=cfg.get('hidden_size'),
