@@ -16,10 +16,6 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         super().__init__(cfg=cfg, trainer=trainer)
         self.noise_schedule = get_noise_scheduler(cfg.transf_decoder)
-        self.time_min = 0.0
-        self.time_max = 1.0
-        self.num_steps = 50
-        self.sampler = None
 
     def _prepare_decoder_input_and_target(self, input_ids, target_ids, mask_prob=None):
 
@@ -39,6 +35,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
             return self._random_sampler(input_ids, mask_prob)
 
     def _random_sampler(self, input_ids, mask_prob):
+        mask_prob = torch.tensor([mask_prob])
         mask_prob = einops.repeat(mask_prob, 'b -> b t', t = input_ids.size(1))
         will_mask = torch.bernoulli(mask_prob).to(dtype=torch.bool).to(input_ids.device)
         masked_input_ids = torch.where(will_mask, 0, input_ids)
@@ -48,8 +45,8 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
     def _topk_sampler(self, input_ids, log_probs, mask_prob):
         if mask_prob == 1.0:
             return torch.zeros_like(input_ids), torch.ones_like(input_ids, dtype=torch.bool)
-
-        topk = round(input_ids.size(1) * (1 - mask_prob)) # number of tokens to keep
+        
+        topk = round(input_ids.size(1) * (1 - mask_prob.item())) # number of tokens to keep
         topk_log_probs, topk_indices = torch.topk(log_probs, k=topk, dim=-1) # find topk indices to keep
         will_mask = torch.ones_like(input_ids, dtype=torch.bool)
         will_mask = will_mask.scatter(1, topk_indices, False)
@@ -117,7 +114,10 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
 
         return output_dict
 
-    def transcribe(self, test_manifest, batch_size=1):
+    def transcribe(self, test_manifest, batch_size=1, num_steps=1, sampler='topk'):
+        self.num_steps = num_steps,
+        self.sampler = sampler
+
         dl_config = {
             'manifest_filepath': test_manifest,
             'sample_rate': self.preprocessor._sample_rate,
@@ -144,11 +144,10 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         transcript_len = transcript_len.to(self.device)
         input_ids, labels = transcript[:, 1:].to(self.device), transcript[:, 1:].to(self.device)
         
-        time_steps = torch.linspace(self.time_min, self.time_max, self.num_steps + 1)[1:]
-        prev_prediction_labels = input_ids
+        time_steps = torch.linspace(0.0, 1.0, self.num_steps + 1)[1:]
+        prev_prediction_labels = torch.ones_like(input_ids)
         prediction_logprobs = None
-        for t in reversed(time_steps): 
-            mask_prob = torch.tensor([t])
+        for mask_prob in reversed(time_steps): 
             # input_ids, labels, will_mask = self._prepare_decoder_input_and_target(input_ids, labels, mask_prob=mask_prob)
             input_ids, will_mask = self._sampler(input_ids, prediction_logprobs, mask_prob=mask_prob)
 
@@ -168,7 +167,8 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 )
             prediction_logprobs, prediction_labels = transf_log_probs.max(dim=-1)
             # carry-over unmasking
-            prediction_labels = torch.where(~will_mask, prev_prediction_labels, prediction_labels)
+            if mask_prob < 1.0:
+                prediction_labels = torch.where(~will_mask, prev_prediction_labels, prediction_labels)
             input_ids = prediction_labels
             prev_prediction_labels = prediction_labels
             

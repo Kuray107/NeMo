@@ -114,7 +114,7 @@ def get_nemo_transformer(
             raise ValueError(f"Unknown arch = {arch}")
     else:
 
-        if cfg.get('dec_type') == 'ddms':
+        if 'ddms' in cfg.get('dec_type'):
             model = TransformerDecoderDDMSNM(
                 vocab_size=cfg.get('vocab_size'),
                 hidden_size=cfg.get('hidden_size'),
