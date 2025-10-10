@@ -56,7 +56,7 @@ def main(cfg):
 
     trainer = pl.Trainer(**resolve_trainer_cfg(cfg.trainer))
     exp_manager(trainer, cfg.get("exp_manager", None))
-    if cfg.model.transf_decoder.dec_type == 'ddms':
+    if 'ddms' in cfg.model.transf_decoder.dec_type :
         asr_model = EncDecTransfDDMSModelBPE(cfg=cfg.model, trainer=trainer)
     else:
         asr_model = EncDecTransfModelBPE(cfg=cfg.model, trainer=trainer)
