@@ -84,6 +84,8 @@ class TranslationConfig:
     dataset_manifest: Optional[str] = None  # Path to dataset's JSON manifest
     audio_key: str = 'audio_filepath'  # Used to override the default audio key in dataset_manifest
     eval_config_yaml: Optional[str] = None  # Path to a yaml file of config of evaluation
+    sampler: str = 'topk'  # Sampler to use for selecting tokens during training. Options = ['random', 'topk']
+    num_steps: int = 1 # Number of steps of sampling steps to apply during inference
 
     # General configs
     output_filename: Optional[str] = None
@@ -184,7 +186,9 @@ def main(cfg: TranslationConfig) -> Union[TranslationConfig, List[str]]:
     # translate audio
     with torch.amp.autocast(asr_model.device.type, enabled=cfg.amp):
         with torch.no_grad():
-            translations = asr_model.transcribe(cfg.dataset_manifest, cfg.batch_size)
+            translations = asr_model.transcribe(
+                cfg.dataset_manifest, cfg.batch_size, cfg.num_steps, cfg.sampler
+            )
     
     logging.info(f"Finished translating {len(filepaths)} files !")
     logging.info(f"Writing translations into file: {cfg.output_filename}")
@@ -204,7 +208,7 @@ def main(cfg: TranslationConfig) -> Union[TranslationConfig, List[str]]:
     # write audio translations
     with open(cfg.output_filename, 'w', encoding='utf-8', newline='\n') as f:
         for filepath, text, translation in zip(filepaths, text_list, translations):
-            translation = translation.replace('<|startoftranscript|>', '').replace('<|endoftext|>', '').replace('<pad>', '').strip()
+            translation = translation.replace('<|startoftranscript|>', '').replace('<|endoftext|>', '').replace('<pad>', '').replace('<|nospeech|>', '').strip()
             item = {'audio_filepath': filepath, 'text': text, 'pred_text': translation}
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     logging.info(f"Finished writing predictions to {cfg.output_filename}!")
