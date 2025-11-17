@@ -19,7 +19,7 @@ from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.models import EncDecTransfModelBPE
 from nemo.collections.asr.parts.submodules.discrete_diffusion_scheduler import get_noise_scheduler
 
-class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
+class EncDecTransfDDMSCTCModelBPE(EncDecTransfModelBPE):
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         super().__init__(cfg=cfg, trainer=trainer)
         

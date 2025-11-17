@@ -43,7 +43,7 @@ python speech_to_text_transformer.py \
 import lightning.pytorch as pl
 from omegaconf import OmegaConf
 
-from nemo.collections.asr.models import EncDecTransfModelBPE, EncDecTransfDDMSModelBPE
+from nemo.collections.asr.models import EncDecTransfModelBPE, EncDecTransfDDMSModelBPE, EncDecTransfDDMSCTCModelBPE
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
@@ -56,8 +56,10 @@ def main(cfg):
 
     trainer = pl.Trainer(**resolve_trainer_cfg(cfg.trainer))
     exp_manager(trainer, cfg.get("exp_manager", None))
-    if 'ddms' in cfg.model.transf_decoder.dec_type :
+    if cfg.model.transf_decoder.dec_type == 'ddms':
         asr_model = EncDecTransfDDMSModelBPE(cfg=cfg.model, trainer=trainer)
+    elif cfg.model.transf_decoder.dec_type == 'ddms_ctc':
+        asr_model = EncDecTransfDDMSCTCModelBPE(cfg=cfg.model, trainer=trainer)
     else:
         asr_model = EncDecTransfModelBPE(cfg=cfg.model, trainer=trainer)
 
