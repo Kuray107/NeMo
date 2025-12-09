@@ -172,6 +172,97 @@ class TransformerDecoderBlock(nn.Module, AttentionAdapterModuleMixin):
             types = self.get_accepted_adapter_types()
         return types
 
+class TransformerDecoderCFGBlock(TransformerDecoderBlock):
+    def forward_preln(self, decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask):
+        """
+        Pre-LayerNorm block
+        Order of operations: LN -> Self-Attn -> Residual -> LN -> (Cross-Attn) -> Residual -> LN -> FFN
+        """
+        residual = decoder_query
+        decoder_query = self.layer_norm_1(decoder_query)
+        decoder_keys = self.layer_norm_1(decoder_keys)
+        self_attn_output = self.first_sub_layer(decoder_query, decoder_keys, decoder_keys, decoder_mask)
+        self_attn_output += residual
+
+        if self.is_adapter_available():
+            # Call the MHA adapters
+            pack_input = {
+                'x': self_attn_output,
+                'loc': 'mha',
+                'att_mask': decoder_mask,
+                'pos_emb': None,
+            }
+            pack_input = self.forward_enabled_adapters(pack_input)
+            self_attn_output = pack_input['x']
+
+        residual = self_attn_output
+        self_attn_output = self.layer_norm_2(self_attn_output)
+        if cfg:
+            # If use classifier-free guidance, do not perform cross-attention, simply copy the previous output
+            enc_dec_attn_output = self_attn_output
+        else:
+            enc_dec_attn_output = self.second_sub_layer(self_attn_output, encoder_states, encoder_states, encoder_mask)
+            enc_dec_attn_output += residual
+
+        residual = enc_dec_attn_output
+        enc_dec_attn_output = self.layer_norm_3(enc_dec_attn_output)
+        output_states = self.third_sub_layer(enc_dec_attn_output)
+        output_states += residual
+
+        if self.is_adapter_available():
+            # Call the Linear adapters
+            pack_input = {
+                'x': output_states,
+                'loc': 'post',
+            }
+            pack_input = self.forward_enabled_adapters(pack_input)
+            output_states = pack_input['x']
+
+        return output_states
+
+    def forward_postln(self, decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask, cfg=False):
+        """
+        Post-LayerNorm block
+        Order of operations: Self-Attn -> Residual -> LN -> (Cross-Attn) -> Residual -> LN -> FFN -> Residual -> LN
+        """
+        self_attn_output = self.first_sub_layer(decoder_query, decoder_keys, decoder_keys, decoder_mask)
+        self_attn_output += decoder_query
+
+        if self.is_adapter_available():
+            # Call the MHA adapters
+            pack_ip = {
+                'x': self_attn_output,
+                'loc': 'mha',
+                'att_mask': decoder_mask,
+                'pos_emb': None,
+            }
+            pack_ip = self.forward_enabled_adapters(pack_ip)
+            self_attn_output = pack_ip['x']
+
+        self_attn_output = self.layer_norm_1(self_attn_output)
+
+        if cfg:
+            # If use classifier-free guidance, do not perform cross-attention, simply copy the previous output
+            enc_dec_attn_output = self_attn_output
+        else:
+            enc_dec_attn_output = self.second_sub_layer(self_attn_output, encoder_states, encoder_states, encoder_mask)
+            enc_dec_attn_output += self_attn_output
+        enc_dec_attn_output = self.layer_norm_2(enc_dec_attn_output)
+
+        output_states = self.third_sub_layer(enc_dec_attn_output)
+        output_states += enc_dec_attn_output
+
+        if self.is_adapter_available():
+            # Call the linear adapters
+            pack_ip = {
+                'x': output_states,
+                'loc': 'post',
+            }
+            pack_ip = self.forward_enabled_adapters(pack_ip)
+            output_states = pack_ip['x']
+        
+        return self.layer_norm_3(output_states)
+
 
 class TransformerDecoder(nn.Module):
     def __init__(

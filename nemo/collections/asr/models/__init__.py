@@ -43,4 +43,5 @@ from nemo.collections.asr.models.ssl_models import (
 )
 from nemo.collections.asr.models.transformer_bpe_models import EncDecTransfModelBPE
 from nemo.collections.asr.models.transformer_ddms_bpe_models import EncDecTransfDDMSModelBPE
+from nemo.collections.asr.models.transformer_ddms_bpe_models2 import EncDecTransfDDMSModelBPE2
 from nemo.collections.asr.models.transformer_ddms_ctc_bpe_models import EncDecTransfDDMSCTCModelBPE

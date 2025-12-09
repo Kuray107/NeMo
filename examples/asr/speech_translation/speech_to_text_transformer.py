@@ -43,7 +43,7 @@ python speech_to_text_transformer.py \
 import lightning.pytorch as pl
 from omegaconf import OmegaConf
 
-from nemo.collections.asr.models import EncDecTransfModelBPE, EncDecTransfDDMSModelBPE, EncDecTransfDDMSCTCModelBPE
+from nemo.collections.asr.models import EncDecTransfModelBPE, EncDecTransfDDMSModelBPE, EncDecTransfDDMSModelBPE2, EncDecTransfDDMSCTCModelBPE
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
