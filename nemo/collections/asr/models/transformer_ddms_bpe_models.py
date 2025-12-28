@@ -78,6 +78,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         # Decide if it is ConcatDataset
         if hasattr(self._train_dl.dataset, 'collate_fn'):
             signal, signal_len, transcript, transcript_len = batch
+            num_cfg_samples = round(signal.size(0) * self.cfg.cfg_ratio)
         else:
             signal, signal_len, transcript, transcript_len, sample_id = batch         
             perm = torch.cat([
@@ -264,6 +265,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         self.short = 0
         self.long = 0
         for i, batch in enumerate(tqdm(temporary_datalayer, desc="Transcribing")):
+            # print (cfg_weight)
             total_len.append(batch[3][0])
             predictions = self.test_step(batch, i, num_steps, cfg_weight=cfg_weight)
             translations.append(predictions)
