@@ -20,6 +20,19 @@ def lens_to_mask(lens, max_length):
     mask = torch.arange(max_length).repeat(batch_size, 1).to(lens.device) < lens[:, None]
     return mask
 
+def do_nucleus_sampling(p_x0, p_nucleus=0.9):
+    p_x0 = p_x0.exp()
+    print (p_x0)
+    sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    top_p_mask = cumulative_probs <= p_nucleus
+    top_p_mask[..., 0] = True #always authorize at least the maximum-prob token 
+    nucleus_probs = sorted_probs * top_p_mask
+    nucleus_probs /= nucleus_probs.sum(dim=-1, keepdim=True)
+    p_x0 = torch.zeros_like(p_x0).scatter_(-1, sorted_indices, nucleus_probs)
+    breakpoint()
+    return p_x0
+
 
 class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
@@ -27,6 +40,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         self.noise_schedule = get_noise_scheduler(cfg.transf_decoder)
         self.unfolded_training = True
+        self.inference_length = 256
 
     def _prepare_decoder_input_and_target(self, input_ids, target_ids, mask_prob=None):
         if mask_prob is None:
@@ -123,6 +137,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 input_signal_length=signal_len,
                 transcript=input_ids,
                 transcript_length=transcript_len,
+                num_cfg_samples=num_cfg_samples
             )
             transf_loss += self.transf_loss(log_probs=transf_log_probs, labels=masked_labels)
         
@@ -268,28 +283,22 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
             # print (cfg_weight)
             total_len.append(batch[3][0])
             predictions = self.test_step(batch, i, num_steps, cfg_weight=cfg_weight)
-            translations.append(predictions)
+            translations.extend(predictions)
         print ("Average transcription length: ", sum(total_len) / (i+1))
         print ("Max transcription length: ", max(total_len))
         print ("Short results: ", self.short)
         print ("Long results: ", self.long)
-        # plot me the distribution of lengths
-        # import matplotlib.pyplot as plt
-        # plt.hist(total_len, bins=50)
-        # plt.title("Transcription Length Distribution")
-        # plt.xlabel("Length")
-        # plt.ylabel("Frequency")
-        # plt.savefig("transcription_length_distribution.png")
+
         return translations
 
     def test_step(self, batch, batch_idx, dataloader_idx=0, carry_over_unmask=True, cfg_weight=None):
         signal, signal_len, transcript, transcript_len = batch
         signal = signal.to(self.device)
-        signal_len = signal_len.to(self.device)
-        transcript = transcript.to(self.device)
-        transcript_len = transcript_len.to(self.device)
-        input_ids, labels = torch.zeros((1, 256), dtype=torch.long, device=self.device), transcript[:, 1:].to(self.device)
-        # input_ids = torch.zeros((1, labels.size(1)), dtype=torch.long, device=self.device)
+        signal_length = signal_len.to(self.device)
+
+        batch_size = signal.size(0)
+        input_ids = torch.zeros((batch_size, self.inference_length), dtype=torch.long, device=self.device)
+        input_ids_length = torch.ones((batch_size,), dtype=torch.long, device=self.device) * self.inference_length
         time_steps = torch.linspace(0.0, 1.0, self.num_steps + 1)[1:]
         prev_prediction_labels = torch.ones_like(input_ids)
         prev_prediction_logprobs = torch.zeros_like(input_ids)
@@ -299,24 +308,20 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 input_ids, prediction_logprobs, mask_prob=mask_prob
             )
 
-            transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
-                input_signal=signal,
-                input_signal_length=signal_len,
-                transcript=input_ids,
-                transcript_length=transcript_len,
-            )
-
-            # Classifier-free guidance re-weighting
-            if mask_prob < 0.5 and cfg_weight:
-                cfg_transf_log_probs, _, _, _ = self.forward(
-                    input_signal=signal,
-                    input_signal_length=signal_len,
+            if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+                transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
+                    processed_signal=signal,
+                    processed_signal_length=signal_length,
                     transcript=input_ids,
-                    transcript_length=transcript_len,
-                    num_cfg_samples=signal.size(0)
+                    transcript_length=input_ids_length,
                 )
-                transf_log_probs = (1 - cfg_weight) * transf_log_probs + cfg_weight * cfg_transf_log_probs
-
+            else:
+                transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
+                    input_signal=signal,
+                    input_signal_length=signal_length,
+                    transcript=input_ids,
+                    transcript_length=input_ids_length,
+                )
             # Zero Masking Probability
             transf_log_probs[:, :, self.tokenizer.pad_id] = float('-inf')
             prediction_logprobs, prediction_labels = transf_log_probs.max(dim=-1)
@@ -327,26 +332,51 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 prediction_labels = torch.where(~will_mask, prev_prediction_labels, prediction_labels)
                 prediction_logprobs = torch.where(~will_mask, prev_prediction_logprobs, prediction_logprobs)
             
-            # find all <eos> token and remove them
-            eos_token_id = 3
-            eos_idx  = (prediction_labels == eos_token_id).nonzero(as_tuple=True)[1]
-            if len(eos_idx) == 0:
-                eos_idx = prediction_labels.size(1)
-            else:
-                eos_idx = eos_idx[0].item()
-
-            prediction_labels = prediction_labels[:, :eos_idx+1]
-            prediction_logprobs = prediction_logprobs[:, :eos_idx+1]
+            # find all <eos> token and update lengths for each sample in the batch
+            eos_token_id = self.tokenizer.eos_id
+            batch_size = prediction_labels.size(0)
+            seq_len = prediction_labels.size(1)
+            
+            # Find EOS position for each sample in the batch
+            # For each sample, find the first EOS token, or use seq_len if no EOS found
+            eos_positions = torch.full((batch_size,), seq_len, dtype=torch.long, device=prediction_labels.device)
+            for batch_idx in range(batch_size):
+                eos_indices = (prediction_labels[batch_idx] == eos_token_id).nonzero(as_tuple=True)[0]
+                if len(eos_indices) > 0:
+                    eos_positions[batch_idx] = eos_indices[0].item() + 1  # +1 to include EOS token
+            
+            # Update input_ids_length to reflect actual sequence length (up to EOS) for each sample
+            input_ids_length = eos_positions
+            
+            # Find the maximum length needed to keep all samples aligned
+            max_len = eos_positions.max().item()
+            
+            # Truncate all samples to max_len (but keep track of individual lengths via input_ids_length)
+            prediction_labels = prediction_labels[:, :max_len]
+            prediction_logprobs = prediction_logprobs[:, :max_len]
             input_ids = prediction_labels
             prev_prediction_labels = prediction_labels
             prev_prediction_logprobs = prediction_logprobs
         
-        if prediction_labels.size(1) < labels.size(1):
-            self.short += 1
-        elif prediction_labels.size(1) > labels.size(1):
-            self.long += 1
-        prediction_labels = self.tokenizer.ids_to_text(prediction_labels.detach().cpu().tolist()[0])
-        return prediction_labels
+        # Process all samples in the batch
+        batch_size = prediction_labels.size(0)
+        translations = []
+        
+        for batch_idx in range(batch_size):
+            sample_length = input_ids_length[batch_idx].item()
+            sample_labels = prediction_labels[batch_idx, :sample_length]
+            if transcript is not None:
+                actual_transcript_len = (transcript_len[batch_idx].item() - 1) # Remove the bos token
+                if sample_length < actual_transcript_len:
+                    self.short += 1
+                elif sample_length > actual_transcript_len:
+                    self.long += 1
+            
+            # Convert to text
+            sample_text = self.tokenizer.ids_to_text(sample_labels.detach().cpu().tolist())
+            translations.append(sample_text)
+        
+        return translations
 
 def sample_categorical(categorical_probs, temperature=1.0, dp=False):
     if temperature == 0.0:
