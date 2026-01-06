@@ -110,6 +110,52 @@ class SmoothedCrossEntropyLoss(Loss):
 
         return neg_log_likelihood
 
+class WeightedSmoothedCrossEntropyLoss(SmoothedCrossEntropyLoss):
+    def forward(self, log_probs, labels, output_mask=None, sample_weights=None):
+        """
+        Args:
+            log_probs: float tensor of shape batch_size x seq_len x vocab_size, values should be log probabilities
+            labels: int tensor of shape batch_size x seq_len
+            output_mask: binary tensor of shape batch_size x seq_len
+            eps: epsilon param to avoid divide by zero in loss calculation
+        """
+        if output_mask is None and self._pad_id is None:
+            raise ValueError("Both output_mask and pad_id are None")
+        if output_mask is None and self._pad_id is not None:
+            output_mask = (labels != self._pad_id).to(log_probs.dtype)
+
+        if output_mask.dtype is not log_probs.dtype:
+            output_mask = output_mask.to(log_probs.dtype)
+
+        batch_size, seq_len, vocab_size = log_probs.size()
+        smoothing = vocab_size * self._label_smoothing / (vocab_size - 1)
+        target_log_probs = log_probs.gather(2, labels.unsqueeze(2)).squeeze(2)
+
+        smoothing_log_probs = log_probs.mean(dim=-1)
+        neg_log_likelihood = (1.0 - smoothing) * target_log_probs + smoothing * smoothing_log_probs
+        neg_log_likelihood = neg_log_likelihood[:, -self._predict_last_k :]
+        output_mask = output_mask[:, -self._predict_last_k :]
+
+        # calculate per-sample weights -----
+        if sample_weights is not None:
+            # sample_weights: (B,)
+            sample_weights = sample_weights.to(neg_log_likelihood.dtype).unsqueeze(1)  # (B,1)
+            weighted_mask = output_mask * sample_weights
+        else:
+            weighted_mask = output_mask
+        # -----------------------------------------
+
+        # original reduction path
+        if self._per_token_reduction:
+            neg_log_likelihood = -torch.sum(neg_log_likelihood * weighted_mask)
+            neg_log_likelihood = neg_log_likelihood / (weighted_mask.sum() + self._eps)
+        else:
+            # return per-token loss
+            neg_log_likelihood = -(neg_log_likelihood * weighted_mask)
+        
+        return neg_log_likelihood
+
+
 
 class SmoothedNLLLoss(NeuralModule, Exportable):
     """

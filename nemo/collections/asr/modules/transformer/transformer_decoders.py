@@ -208,9 +208,12 @@ class TransformerDecoderCFGBlock(TransformerDecoderBlock):
         # Classifier-free guidance: bypass cross-attention for last 4 samples
         batch_size = enc_dec_attn_output.size(0)
         if num_cfg_samples > 0:
-            cfg_start = batch_size - num_cfg_samples
+            # randomly sample which samples to bypass cross-attention for CFG
+            cfg_indices = torch.randperm(batch_size)[-num_cfg_samples:]
+            enc_dec_attn_output[cfg_indices] = residual[cfg_indices]
+            # cfg_start = batch_size - num_cfg_samples
             # For these samples, ignore cross-attn and just pass self-attn output forward
-            enc_dec_attn_output[cfg_start:] = residual[cfg_start:]
+            # enc_dec_attn_output[cfg_start:] = residual[cfg_start:]
 
         residual = enc_dec_attn_output
         enc_dec_attn_output = self.layer_norm_3(enc_dec_attn_output)

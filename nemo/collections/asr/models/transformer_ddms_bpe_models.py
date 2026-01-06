@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from nemo.collections.asr.data.audio_to_text_dali import DALIOutputs
 from nemo.collections.asr.models import EncDecTransfModelBPE
+from nemo.collections.common.losses import WeightedSmoothedCrossEntropyLoss, SmoothedCrossEntropyLoss
 from nemo.collections.asr.parts.submodules.discrete_diffusion_scheduler import get_noise_scheduler
 
 
@@ -41,17 +42,23 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         self.noise_schedule = get_noise_scheduler(cfg.transf_decoder)
         self.unfolded_training = True
         self.inference_length = 256
+        
+        # Define weighted CE loss
+        self.transf_loss = WeightedSmoothedCrossEntropyLoss(
+            pad_id=self.tokenizer.pad_id, label_smoothing=self.cfg.label_smoothing
+        )
 
     def _prepare_decoder_input_and_target(self, input_ids, target_ids, mask_prob=None):
         if mask_prob is None:
             mask_prob = self.noise_schedule.sample_time(batch_size=input_ids.size(0), device=input_ids.device)
+        weights = 1 / (mask_prob)
         
         mask_prob = einops.repeat(mask_prob, 'b -> b t', t = input_ids.size(1))
         will_mask = torch.bernoulli(mask_prob).to(dtype=torch.bool).to(input_ids.device)
         masked_input_ids = torch.where(will_mask, 0, input_ids)
         masked_target_ids = torch.where(~will_mask, self.tokenizer.pad_id, target_ids)
 
-        return masked_input_ids, masked_target_ids, will_mask
+        return masked_input_ids, masked_target_ids, will_mask, weights
 
     def _sampler(self, input_ids, log_probs, mask_prob):
         if self.sampler == 'topk':
@@ -110,7 +117,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         input_ids, labels = transcript[:, 1:], transcript[:, 1:] # Remove the bos token for input_ids as well
 
         # Modify the input_ids by masking out some of the tokens
-        input_ids, masked_labels, will_mask = self._prepare_decoder_input_and_target(input_ids, labels)
+        input_ids, masked_labels, will_mask, weights = self._prepare_decoder_input_and_target(input_ids, labels)
 
         transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
             input_signal=signal,
@@ -120,7 +127,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
             num_cfg_samples=num_cfg_samples
         )
 
-        transf_loss = self.transf_loss(log_probs=transf_log_probs, labels=masked_labels)
+        transf_loss = self.transf_loss(log_probs=transf_log_probs, labels=masked_labels, sample_weights=weights)
 
         if self.unfolded_training:
             # perform unfolded training by resampling
@@ -131,7 +138,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
             prediction_labels = torch.where(~will_mask, input_ids, prediction_labels)
             del input_ids
             # resample again with the new prediction_labels and calculate the loss again
-            input_ids, masked_labels, will_mask = self._prepare_decoder_input_and_target(prediction_labels, labels)
+            input_ids, masked_labels, will_mask, weights = self._prepare_decoder_input_and_target(prediction_labels, labels)
             transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
                 input_signal=signal,
                 input_signal_length=signal_len,
@@ -139,7 +146,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 transcript_length=transcript_len,
                 num_cfg_samples=num_cfg_samples
             )
-            transf_loss += self.transf_loss(log_probs=transf_log_probs, labels=masked_labels)
+            transf_loss += self.transf_loss(log_probs=transf_log_probs, labels=masked_labels, sample_weights=weights)
         
         del transf_log_probs, encoded_len, enc_states, enc_mask
 
@@ -215,7 +222,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         # For validation efficiency, we only test 2-step denoising
         for mask_prob in [1.0, 0.5]:
-            input_ids, labels, will_mask = self._prepare_decoder_input_and_target(
+            input_ids, labels, will_mask, weights = self._prepare_decoder_input_and_target(
                 input_ids, labels, mask_prob=torch.tensor([mask_prob]).repeat(input_ids.size(0))
             )
 
@@ -225,15 +232,15 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 transcript=input_ids,
                 transcript_length=transcript_len,
             )
-            if mask_prob < 1.0:
-                cfg_transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
-                    input_signal=signal,
-                    input_signal_length=signal_len,
-                    transcript=input_ids,
-                    transcript_length=transcript_len,
-                    num_cfg_samples=signal.size(0)
-                )
-                transf_log_probs = 0.9 * transf_log_probs + 0.1 * cfg_transf_log_probs # simple CFG averaging
+            # if mask_prob < 1.0:
+            #     cfg_transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
+            #         input_signal=signal,
+            #         input_signal_length=signal_len,
+            #         transcript=input_ids,
+            #         transcript_length=transcript_len,
+            #         num_cfg_samples=signal.size(0)
+            #     )
+            #     transf_log_probs = 0.9 * transf_log_probs + 0.1 * cfg_transf_log_probs # simple CFG averaging
             prediction_logprobs, prediction_labels = transf_log_probs.max(dim=-1)
             
             # carry-over unmasking
@@ -280,7 +287,6 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         self.short = 0
         self.long = 0
         for i, batch in enumerate(tqdm(temporary_datalayer, desc="Transcribing")):
-            # print (cfg_weight)
             total_len.append(batch[3][0])
             predictions = self.test_step(batch, i, num_steps, cfg_weight=cfg_weight)
             translations.extend(predictions)
@@ -322,6 +328,18 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                     transcript=input_ids,
                     transcript_length=input_ids_length,
                 )
+
+            # Classifier-free guidance re-weighting
+            if mask_prob < 0.5 and cfg_weight:
+                cfg_transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
+                    input_signal=signal,
+                    input_signal_length=signal_length,
+                    transcript=input_ids,
+                    transcript_length=input_ids_length,
+                    num_cfg_samples=signal.size(0)
+                )
+                transf_log_probs = (1 - cfg_weight) * transf_log_probs + 0 * cfg_transf_log_probs
+
             # Zero Masking Probability
             transf_log_probs[:, :, self.tokenizer.pad_id] = float('-inf')
             prediction_logprobs, prediction_labels = transf_log_probs.max(dim=-1)
