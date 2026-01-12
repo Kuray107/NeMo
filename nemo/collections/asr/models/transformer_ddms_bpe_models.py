@@ -60,11 +60,12 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
 
         return masked_input_ids, masked_target_ids, will_mask, weights
 
-    def _sampler(self, input_ids, log_probs, mask_prob):
+    def _sampler(self, input_ids, log_probs, mask_prob, seq_len=None):
         if self.sampler == 'topk':
-            return self._topk_sampler(input_ids, log_probs, mask_prob)
-        elif self.sampler == 'topk-r':
-            return self._topk_r_sampler(input_ids, log_probs, mask_prob)
+            if input_ids.size(0) == 1:
+                return self._topk_sampler(input_ids, log_probs, mask_prob)
+            else:
+                return self._topk_batch_sampler(input_ids, log_probs, mask_prob, seq_len)
         else:
             return self._random_sampler(input_ids, mask_prob)
 
@@ -88,8 +89,19 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         return masked_input_ids, will_mask
 
-    def _topk_r_sampler(self, input_ids, log_probs, mask_prob):
-        pass
+    def _topk_batch_sampler(self, input_ids, log_probs, mask_prob, seq_len):
+        if mask_prob == 1.0:
+            return torch.zeros_like(input_ids), torch.ones_like(input_ids, dtype=torch.bool)
+        
+        will_masks = torch.zeros_like(input_ids, dtype=torch.bool)
+        masked_input_ids = torch.zeros_like(input_ids)
+        i = 0
+        for input_id, log_prob, len in zip(input_ids, log_probs, seq_len):
+            masked_input_id, will_mask = self._topk_sampler(input_id[:len].unsqueeze(0), log_prob[:len].unsqueeze(0), mask_prob)
+            will_masks[i][:len] = will_mask
+            masked_input_ids[i][:len] = masked_input_id
+            i += 1
+        return masked_input_ids, will_masks
     
     def compute_audio_loss(self, batch):
 
@@ -112,6 +124,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
             transcript_len= transcript_len.index_select(0, perm)
             num_cfg_samples = torch.sum(sample_id == 1).item()
             signal[signal.size(0)-num_cfg_samples:] = 0.0
+            num_cfg_samples = -num_cfg_samples
 
 
         input_ids, labels = transcript[:, 1:], transcript[:, 1:] # Remove the bos token for input_ids as well
@@ -290,8 +303,6 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
             total_len.append(batch[3][0])
             predictions = self.test_step(batch, i, num_steps, cfg_weight=cfg_weight)
             translations.extend(predictions)
-        print ("Average transcription length: ", sum(total_len) / (i+1))
-        print ("Max transcription length: ", max(total_len))
         print ("Short results: ", self.short)
         print ("Long results: ", self.long)
 
@@ -311,7 +322,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         prediction_logprobs = None
         for mask_prob in reversed(time_steps):
             input_ids, will_mask = self._sampler(
-                input_ids, prediction_logprobs, mask_prob=mask_prob
+                input_ids, prediction_logprobs, mask_prob=mask_prob, seq_len=input_ids_length
             )
 
             if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
@@ -330,7 +341,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 )
 
             # Classifier-free guidance re-weighting
-            if mask_prob < 0.5 and cfg_weight:
+            if mask_prob < 1.0 and cfg_weight != 0.0:
                 cfg_transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
                     input_signal=signal,
                     input_signal_length=signal_length,

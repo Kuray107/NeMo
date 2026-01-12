@@ -86,7 +86,7 @@ class TranslationConfig:
     eval_config_yaml: Optional[str] = None  # Path to a yaml file of config of evaluation
     sampler: str = 'topk'  # Sampler to use for selecting tokens during training. Options = ['random', 'topk']
     num_steps: int = 1 # Number of steps of sampling steps to apply during inference
-    cfg_weight: Optional[float] = None
+    cfg_weight: Optional[float] = 0.0
 
     # General configs
     output_filename: Optional[str] = None
