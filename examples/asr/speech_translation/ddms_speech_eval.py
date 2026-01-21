@@ -188,7 +188,7 @@ def main(cfg: TranslationConfig) -> Union[TranslationConfig, List[str]]:
     with torch.amp.autocast(asr_model.device.type, enabled=cfg.amp):
         with torch.no_grad():
             translations = asr_model.transcribe(
-                cfg.dataset_manifest, cfg.batch_size, cfg.num_steps, cfg.sampler, cfg.cfg_weight
+                cfg.dataset_manifest, cfg.batch_size, cfg.num_steps, cfg.cfg_weight
             )
     
     logging.info(f"Finished translating {len(filepaths)} files !")
