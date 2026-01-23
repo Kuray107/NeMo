@@ -14,17 +14,18 @@
 
 import json
 import os
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass, is_dataclass, field
 from typing import List, Optional, Union
 
 import lightning.pytorch as pl
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from nemo.collections.asr.modules.conformer_encoder import ConformerChangeConfig
 from nemo.collections.asr.parts.utils.transcribe_utils import compute_output_filename, prepare_audio_data, setup_model
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
+from nemo.collections.asr.parts.submodules.discrete_diffusion_samplers import get_sampler
 
 """
 Translate audio file on a single CPU/GPU. Useful for translations of moderate amounts of audio data.
@@ -83,9 +84,11 @@ class TranslationConfig:
     audio_dir: Optional[str] = None  # Path to a directory which contains audio files
     dataset_manifest: Optional[str] = None  # Path to dataset's JSON manifest
     audio_key: str = 'audio_filepath'  # Used to override the default audio key in dataset_manifest
-    eval_config_yaml: Optional[str] = None  # Path to a yaml file of config of evaluation
-    sampler: str = 'topk'  # Sampler to use for selecting tokens during training. Options = ['random', 'topk']
-    num_steps: int = 1 # Number of steps of sampling steps to apply during inference
+    eval_config_yaml: Optional[str] = None  # Path to a yaml file of config of 
+    
+
+    # Override sampler config, length scale, and num_steps
+    sampler: dict = field(default_factory=dict)
     cfg_weight: Optional[float] = 0.0
 
     # General configs
@@ -170,6 +173,20 @@ def main(cfg: TranslationConfig) -> Union[TranslationConfig, List[str]]:
     asr_model.set_trainer(trainer)
     asr_model = asr_model.eval()
 
+    # override sampler if necessary
+    if cfg.sampler:
+        logging.info('Overriding sampler with %s', cfg.sampler)
+        if hasattr(asr_model, 'sampler'):
+            new_sampler_config = asr_model.sampler.config
+            # override sampler config
+            with open_dict(new_sampler_config):
+                for key, value in cfg.sampler.items():
+                    new_sampler_config[key] = value
+            logging.info(f"New sampler config: {new_sampler_config}")
+            asr_model.sampler = get_sampler(new_sampler_config, asr_model)
+        else:
+            raise RuntimeError('Model does not have a sampler')
+
     # prepare audio filepaths and decide wether it's partial audio
     filepaths, partial_audio = prepare_audio_data(cfg)
 
@@ -188,7 +205,7 @@ def main(cfg: TranslationConfig) -> Union[TranslationConfig, List[str]]:
     with torch.amp.autocast(asr_model.device.type, enabled=cfg.amp):
         with torch.no_grad():
             translations = asr_model.transcribe(
-                cfg.dataset_manifest, cfg.batch_size, cfg.num_steps, cfg.cfg_weight
+                cfg.dataset_manifest, cfg.batch_size, cfg.cfg_weight
             )
     
     logging.info(f"Finished translating {len(filepaths)} files !")

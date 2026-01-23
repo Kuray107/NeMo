@@ -147,7 +147,8 @@ class AncestralConfTopKSampler(Sampler):
         p_x0 = log_probs.exp()
         p_x0 = self.do_nucleus_sampling(p_x0)
 
-        pred_ids = sample_categorical(p_x0, dp=self.use_float64)
+        #pred_ids = sample_categorical(p_x0, dp=self.use_float64)
+        pred_ids = p_x0.argmax(dim=-1)
 
         masked_flag = ~copy_flag
         new_ids = current_ids.clone()
@@ -225,7 +226,8 @@ class DimpleSampler(Sampler):
         p_x0 = log_probs.exp()
         p_x0 = self.do_nucleus_sampling(p_x0)
 
-        pred_ids = sample_categorical(p_x0, dp=self.use_float64)
+        #pred_ids = sample_categorical(p_x0, dp=self.use_float64)
+        pred_ids = p_x0.argmax(dim=-1)
 
         if is_last_step:
             new_ids = torch.where(copy_flag, current_ids, pred_ids)
@@ -275,8 +277,12 @@ class DimpleSampler(Sampler):
 
             # Apply confidence-based selection where applicable
             if use_conf_mask.any():
-                batch_idx = torch.arange(current_ids.size(0), device=current_ids.device).unsqueeze(1)
                 conf_selected = select_mask & use_conf_mask.unsqueeze(1)
+                batch_idx = (
+                    torch.arange(current_ids.size(0), device=current_ids.device)
+                    .unsqueeze(1)
+                    .expand_as(conf_selected)
+                )
                 conf_batches = batch_idx[conf_selected]
                 conf_positions = torch.arange(total_tokens, device=current_ids.device).unsqueeze(0).expand_as(select_mask)[conf_selected]
                 new_ids[conf_batches, conf_positions] = pred_ids[conf_batches, conf_positions]

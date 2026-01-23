@@ -28,10 +28,13 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         self.noise_schedule = get_noise_scheduler(cfg.transf_decoder)
         self.unfolded_training = True
-        self.inference_length = 256
+        self.max_inference_length = 256
+        self.max_token_rate = 10
         self.mask_id = 0
         self.pad_id = self.tokenizer.pad_id
         self.eos_id = self.tokenizer.eos_id
+        self.time_min = self.cfg.get("time_min", 1e-8)
+        self.time_max = self.cfg.get("time_max", 1.0)
 
         if not hasattr(cfg, 'sampler'):
             sampler_config = {
@@ -252,8 +255,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
 
         return output_dict
 
-    def transcribe(self, test_manifest, batch_size=1, num_steps=1, cfg_weight=None):
-        self.sampler.num_steps = num_steps
+    def transcribe(self, test_manifest, batch_size=1, cfg_weight=None):
 
         dl_config = {
             'manifest_filepath': test_manifest,
@@ -273,7 +275,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         self.long = 0
         for i, batch in enumerate(tqdm(temporary_datalayer, desc="Transcribing")):
             total_len.append(batch[3][0])
-            predictions = self.test_step(batch, i, num_steps, cfg_weight=cfg_weight)
+            predictions = self.test_step(batch=batch, batch_idx=i, cfg_weight=cfg_weight)
             translations.extend(predictions)
         print ("Short results: ", self.short)
         print ("Long results: ", self.long)
@@ -287,14 +289,16 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
 
         batch_size = signal.size(0)
         time_steps = torch.linspace(0.0, 1.0, self.sampler.num_steps + 1)[1:]
-        current_ids = torch.full((batch_size, self.inference_length), self.mask_id, dtype=torch.long, device=self.device)
-        current_ids_length = torch.full((batch_size,), self.inference_length, dtype=torch.long, device=self.device)
-        copy_flag = torch.zeros((batch_size, self.inference_length), dtype=torch.bool, device=self.device)
+
+        inference_length = int(min(self.max_inference_length, signal_length.max().item() / self.preprocessor._sample_rate * self.max_token_rate))
+        current_ids = torch.full((batch_size, inference_length), self.mask_id, dtype=torch.long, device=self.device)
+        current_ids_length = torch.full((batch_size,), inference_length, dtype=torch.long, device=self.device)
+        copy_flag = torch.zeros((batch_size, inference_length), dtype=torch.bool, device=self.device)
         run_forward = True
 
         for t in reversed(time_steps):
-            alpha_t = torch.tensor([t], device=self.device)
-            alpha_s = torch.tensor([t - 1], device=self.device)
+            alpha_t = self.noise_schedule.compute_noise_parameters(t)[1]
+            alpha_s = self.noise_schedule.compute_noise_parameters(t - self.time_step)[1]
 
             if run_forward:
                 transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
@@ -351,9 +355,6 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         return translations
 
-def sample_categorical(categorical_probs, temperature=1.0, dp=False):
-    if temperature == 0.0:
-        return categorical_probs.max(dim=-1)  # Skip noise when temperature is 0 (sampling Gumbel is costly)
-    noise = torch.rand_like(categorical_probs, dtype=(torch.float64 if dp else torch.float32))
-    gumbel_noise = (-torch.log(noise)) ** temperature
-    return (categorical_probs / gumbel_noise).max(dim=-1)
+    @property
+    def time_step(self):
+        return (self.time_max - self.time_min) / self.sampler.num_steps
