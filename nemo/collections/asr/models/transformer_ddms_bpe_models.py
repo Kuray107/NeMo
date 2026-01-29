@@ -38,7 +38,8 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
 
         if not hasattr(cfg, 'sampler'):
             sampler_config = {
-                'type': 'ancestral-conf-top-k',
+                'type': 'ancestral-cache',
+                'use_greedy': False,
                 'num_steps': 4,
                 'p_nucleus': 1.0,
                 'use_float64': True,
@@ -334,6 +335,8 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
                 current_ids = new_ids
                 current_ids_length = new_ids_length
                 copy_flag = new_copy_flag
+            if new_copy_flag.all():
+                break
         
         # Process all samples in the batch
         batch_size = current_ids.size(0)
