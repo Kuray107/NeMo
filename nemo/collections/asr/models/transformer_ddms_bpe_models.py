@@ -14,25 +14,12 @@ from nemo.collections.asr.data.audio_to_text_dali import DALIOutputs
 from nemo.collections.asr.models import EncDecTransfModelBPE
 from nemo.collections.common.losses import WeightedSmoothedCrossEntropyLoss, SmoothedCrossEntropyLoss
 from nemo.collections.asr.parts.submodules.discrete_diffusion_scheduler import get_noise_scheduler
-
+from nemo.collections.asr.parts.submodules.discrete_diffusion_samplers import get_sampler
 
 def lens_to_mask(lens, max_length):
     batch_size = lens.shape[0]
     mask = torch.arange(max_length).repeat(batch_size, 1).to(lens.device) < lens[:, None]
     return mask
-
-def do_nucleus_sampling(p_x0, p_nucleus=0.9):
-    p_x0 = p_x0.exp()
-    print (p_x0)
-    sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
-    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-    top_p_mask = cumulative_probs <= p_nucleus
-    top_p_mask[..., 0] = True #always authorize at least the maximum-prob token 
-    nucleus_probs = sorted_probs * top_p_mask
-    nucleus_probs /= nucleus_probs.sum(dim=-1, keepdim=True)
-    p_x0 = torch.zeros_like(p_x0).scatter_(-1, sorted_indices, nucleus_probs)
-    breakpoint()
-    return p_x0
 
 
 class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
@@ -41,7 +28,40 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         self.noise_schedule = get_noise_scheduler(cfg.transf_decoder)
         self.unfolded_training = True
-        self.inference_length = 256
+        self.max_inference_length = 256
+        self.max_token_rate = 10
+        self.mask_id = 0
+        self.pad_id = self.tokenizer.pad_id
+        self.eos_id = self.tokenizer.eos_id
+        self.time_min = self.cfg.get("time_min", 1e-8)
+        self.time_max = self.cfg.get("time_max", 1.0)
+
+        if not hasattr(cfg, 'sampler'):
+            sampler_config = {
+                'type': 'ancestral-cache',
+                'use_greedy': False,
+                'num_steps': 4,
+                'p_nucleus': 1.0,
+                'use_float64': True,
+            }
+            sampler_cfg = OmegaConf.create(sampler_config)
+            if OmegaConf.is_readonly(cfg):
+                OmegaConf.set_readonly(cfg, False)
+                try:
+                    if OmegaConf.is_struct(cfg):
+                        with open_dict(cfg):
+                            cfg.sampler = sampler_cfg
+                    else:
+                        cfg.sampler = sampler_cfg
+                finally:
+                    OmegaConf.set_readonly(cfg, True)
+            else:
+                if OmegaConf.is_struct(cfg):
+                    with open_dict(cfg):
+                        cfg.sampler = sampler_cfg
+                else:
+                    cfg.sampler = sampler_cfg
+        self.sampler = get_sampler(cfg.sampler, self)
         
         # Define weighted CE loss
         self.transf_loss = WeightedSmoothedCrossEntropyLoss(
@@ -55,53 +75,10 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         mask_prob = einops.repeat(mask_prob, 'b -> b t', t = input_ids.size(1))
         will_mask = torch.bernoulli(mask_prob).to(dtype=torch.bool).to(input_ids.device)
-        masked_input_ids = torch.where(will_mask, 0, input_ids)
+        masked_input_ids = torch.where(will_mask, self.mask_id, input_ids)
         masked_target_ids = torch.where(~will_mask, self.tokenizer.pad_id, target_ids)
 
         return masked_input_ids, masked_target_ids, will_mask, weights
-
-    def _sampler(self, input_ids, log_probs, mask_prob, seq_len=None):
-        if self.sampler == 'topk':
-            if input_ids.size(0) == 1:
-                return self._topk_sampler(input_ids, log_probs, mask_prob)
-            else:
-                return self._topk_batch_sampler(input_ids, log_probs, mask_prob, seq_len)
-        else:
-            return self._random_sampler(input_ids, mask_prob)
-
-    def _random_sampler(self, input_ids, mask_prob):
-        mask_prob = torch.tensor([mask_prob])
-        mask_prob = einops.repeat(mask_prob, 'b -> b t', t = input_ids.size(1))
-        will_mask = torch.bernoulli(mask_prob).to(dtype=torch.bool).to(input_ids.device)
-        masked_input_ids = torch.where(will_mask, 0, input_ids)
-        
-        return masked_input_ids, will_mask
-
-    def _topk_sampler(self, input_ids, log_probs, mask_prob):
-        if mask_prob == 1.0:
-            return torch.zeros_like(input_ids), torch.ones_like(input_ids, dtype=torch.bool)
-        
-        topk = round(input_ids.size(1) * (1 - mask_prob.item())) # number of tokens to keep
-        topk_log_probs, topk_indices = torch.topk(log_probs, k=topk, dim=-1) # find topk indices to keep
-        will_mask = torch.ones_like(input_ids, dtype=torch.bool)
-        will_mask = will_mask.scatter(1, topk_indices, False)
-        masked_input_ids = torch.where(will_mask, 0, input_ids)
-        
-        return masked_input_ids, will_mask
-
-    def _topk_batch_sampler(self, input_ids, log_probs, mask_prob, seq_len):
-        if mask_prob == 1.0:
-            return torch.zeros_like(input_ids), torch.ones_like(input_ids, dtype=torch.bool)
-        
-        will_masks = torch.zeros_like(input_ids, dtype=torch.bool)
-        masked_input_ids = torch.zeros_like(input_ids)
-        i = 0
-        for input_id, log_prob, len in zip(input_ids, log_probs, seq_len):
-            masked_input_id, will_mask = self._topk_sampler(input_id[:len].unsqueeze(0), log_prob[:len].unsqueeze(0), mask_prob)
-            will_masks[i][:len] = will_mask
-            masked_input_ids[i][:len] = masked_input_id
-            i += 1
-        return masked_input_ids, will_masks
     
     def compute_audio_loss(self, batch):
 
@@ -279,9 +256,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
 
         return output_dict
 
-    def transcribe(self, test_manifest, batch_size=1, num_steps=1, sampler='topk', cfg_weight=None):
-        self.num_steps = num_steps
-        self.sampler = sampler
+    def transcribe(self, test_manifest, batch_size=1, cfg_weight=None):
 
         dl_config = {
             'manifest_filepath': test_manifest,
@@ -301,7 +276,7 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         self.long = 0
         for i, batch in enumerate(tqdm(temporary_datalayer, desc="Transcribing")):
             total_len.append(batch[3][0])
-            predictions = self.test_step(batch, i, num_steps, cfg_weight=cfg_weight)
+            predictions = self.test_step(batch=batch, batch_idx=i, cfg_weight=cfg_weight)
             translations.extend(predictions)
         print ("Short results: ", self.short)
         print ("Long results: ", self.long)
@@ -314,86 +289,62 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         signal_length = signal_len.to(self.device)
 
         batch_size = signal.size(0)
-        input_ids = torch.zeros((batch_size, self.inference_length), dtype=torch.long, device=self.device)
-        input_ids_length = torch.ones((batch_size,), dtype=torch.long, device=self.device) * self.inference_length
-        time_steps = torch.linspace(0.0, 1.0, self.num_steps + 1)[1:]
-        prev_prediction_labels = torch.ones_like(input_ids)
-        prev_prediction_logprobs = torch.zeros_like(input_ids)
-        prediction_logprobs = None
-        for mask_prob in reversed(time_steps):
-            input_ids, will_mask = self._sampler(
-                input_ids, prediction_logprobs, mask_prob=mask_prob, seq_len=input_ids_length
+        time_steps = torch.linspace(0.0, 1.0, self.sampler.num_steps + 1)[1:]
+
+        inference_length = int(min(self.max_inference_length, signal_length.max().item() / self.preprocessor._sample_rate * self.max_token_rate))
+        current_ids = torch.full((batch_size, inference_length), self.mask_id, dtype=torch.long, device=self.device)
+        current_ids_length = torch.full((batch_size,), inference_length, dtype=torch.long, device=self.device)
+        copy_flag = torch.zeros((batch_size, inference_length), dtype=torch.bool, device=self.device)
+        run_forward = True
+
+        for t in reversed(time_steps):
+            alpha_t = self.noise_schedule.compute_noise_parameters(t)[1]
+            alpha_s = self.noise_schedule.compute_noise_parameters(t - self.time_step)[1]
+
+            if run_forward:
+                transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
+                    input_signal=signal,
+                    input_signal_length=signal_length,
+                    transcript=current_ids,
+                    transcript_length=current_ids_length,
+                )
+                if t < 1.0 and cfg_weight != 0.0:
+                    cfg_transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
+                        input_signal=signal,
+                        input_signal_length=signal_length,
+                        transcript=current_ids,
+                        transcript_length=current_ids_length,
+                        num_cfg_samples=signal.size(0)
+                    )
+                    transf_log_probs = (1 - cfg_weight) * transf_log_probs + cfg_weight * cfg_transf_log_probs
+
+
+            new_ids, new_ids_length, new_copy_flag = self.sampler.update(
+                current_ids=current_ids,
+                copy_flag=copy_flag,
+                alpha_t=alpha_t,
+                alpha_s=alpha_s,
+                log_probs=transf_log_probs,
+                is_last_step=(t == time_steps[0])
             )
 
-            if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-                transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
-                    processed_signal=signal,
-                    processed_signal_length=signal_length,
-                    transcript=input_ids,
-                    transcript_length=input_ids_length,
-                )
+            if torch.equal(new_copy_flag, copy_flag):
+                run_forward = False
             else:
-                transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
-                    input_signal=signal,
-                    input_signal_length=signal_length,
-                    transcript=input_ids,
-                    transcript_length=input_ids_length,
-                )
-
-            # Classifier-free guidance re-weighting
-            if mask_prob < 1.0 and cfg_weight != 0.0:
-                cfg_transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
-                    input_signal=signal,
-                    input_signal_length=signal_length,
-                    transcript=input_ids,
-                    transcript_length=input_ids_length,
-                    num_cfg_samples=signal.size(0)
-                )
-                transf_log_probs = (1 - cfg_weight) * transf_log_probs + 0 * cfg_transf_log_probs
-
-            # Zero Masking Probability
-            transf_log_probs[:, :, self.tokenizer.pad_id] = float('-inf')
-            prediction_logprobs, prediction_labels = transf_log_probs.max(dim=-1)
-            # prediction_logprobs, prediction_labels = sample_categorical(transf_log_probs, temperature=1.0)
-
-            # carry-over unmasking
-            if mask_prob < 1.0 and carry_over_unmask:
-                prediction_labels = torch.where(~will_mask, prev_prediction_labels, prediction_labels)
-                prediction_logprobs = torch.where(~will_mask, prev_prediction_logprobs, prediction_logprobs)
-            
-            # find all <eos> token and update lengths for each sample in the batch
-            eos_token_id = self.tokenizer.eos_id
-            batch_size = prediction_labels.size(0)
-            seq_len = prediction_labels.size(1)
-            
-            # Find EOS position for each sample in the batch
-            # For each sample, find the first EOS token, or use seq_len if no EOS found
-            eos_positions = torch.full((batch_size,), seq_len, dtype=torch.long, device=prediction_labels.device)
-            for batch_idx in range(batch_size):
-                eos_indices = (prediction_labels[batch_idx] == eos_token_id).nonzero(as_tuple=True)[0]
-                if len(eos_indices) > 0:
-                    eos_positions[batch_idx] = eos_indices[0].item() + 1  # +1 to include EOS token
-            
-            # Update input_ids_length to reflect actual sequence length (up to EOS) for each sample
-            input_ids_length = eos_positions
-            
-            # Find the maximum length needed to keep all samples aligned
-            max_len = eos_positions.max().item()
-            
-            # Truncate all samples to max_len (but keep track of individual lengths via input_ids_length)
-            prediction_labels = prediction_labels[:, :max_len]
-            prediction_logprobs = prediction_logprobs[:, :max_len]
-            input_ids = prediction_labels
-            prev_prediction_labels = prediction_labels
-            prev_prediction_logprobs = prediction_logprobs
+                run_forward = True
+                current_ids = new_ids
+                current_ids_length = new_ids_length
+                copy_flag = new_copy_flag
+            if new_copy_flag.all():
+                break
         
         # Process all samples in the batch
-        batch_size = prediction_labels.size(0)
+        batch_size = current_ids.size(0)
         translations = []
         
         for batch_idx in range(batch_size):
-            sample_length = input_ids_length[batch_idx].item()
-            sample_labels = prediction_labels[batch_idx, :sample_length]
+            sample_length = current_ids_length[batch_idx].item()
+            sample_labels = current_ids[batch_idx, :sample_length]
             if transcript is not None:
                 actual_transcript_len = (transcript_len[batch_idx].item() - 1) # Remove the bos token
                 if sample_length < actual_transcript_len:
@@ -407,9 +358,6 @@ class EncDecTransfDDMSModelBPE(EncDecTransfModelBPE):
         
         return translations
 
-def sample_categorical(categorical_probs, temperature=1.0, dp=False):
-    if temperature == 0.0:
-        return categorical_probs.max(dim=-1)  # Skip noise when temperature is 0 (sampling Gumbel is costly)
-    noise = torch.rand_like(categorical_probs, dtype=(torch.float64 if dp else torch.float32))
-    gumbel_noise = (-torch.log(noise)) ** temperature
-    return (categorical_probs / gumbel_noise).max(dim=-1)
+    @property
+    def time_step(self):
+        return (self.time_max - self.time_min) / self.sampler.num_steps
