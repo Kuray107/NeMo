@@ -23,18 +23,12 @@ def get_sampler(config, model):
         return ConfTopKMarginSampler(config, model)
     elif type == 'EB-conf-top-k':
         return EntropyBoundedConfTopKSampler(config, model)
+    elif type == 'EB-conf-top-k-pos-biased':
+        return EntropyBoundedPositionalBiasedConfTopKSampler(config, model)
     elif type == 'conf-top-p':
         return ConfTopPSampler(config, model)
     elif type == 'DFM':
         return DiscreteFlowMatchingSampler(config, model)
-    # elif type == 'remdm-cap':
-    #     return ReMDMCap(config, model)
-    # elif type == 'remdm-rescale':
-    #     return ReMDMRescale(config, model)
-    # elif type == 'remdm-loop':
-    #      return ReMDMLoop(config, model)
-    # elif config.sampling.predictor == 'forward-backward':
-    #     return ForwardBackward(config, model, tokenizer)
     else:
         raise ValueError(f"Invalid sampler: {type}")
 
@@ -91,6 +85,14 @@ class Sampler:
         # Find EOS position for each sample in the batch.
         # If no EOS, keep length as seq_len and do not pad/truncate.
         eos_mask = token_ids == self.eos_id
+        if not eos_mask.any():
+            new_token_lengths = torch.full(
+                (token_ids.size(0),),
+                seq_len,
+                dtype=torch.long,
+                device=token_ids.device,
+            )
+            return token_ids, copy_flag, new_token_lengths
         idx = torch.arange(seq_len, device=token_ids.device).unsqueeze(0)
         first_eos = torch.where(eos_mask, idx, seq_len).min(dim=1).values
         eos_positions = torch.where(
@@ -334,6 +336,63 @@ class EntropyBoundedConfTopKSampler(Sampler):
         new_ids, new_copy_flag, new_ids_length = self.update_length(new_ids, new_copy_flag)
         return new_ids, new_ids_length, new_copy_flag
 
+class EntropyBoundedPositionalBiasedConfTopKSampler(Sampler):
+    def __init__(self, config, model):
+        super().__init__(config, model)
+        self.lambda_val = config.get("lambda_val", 0.1)
+        self.gamma = config.get("gamma", 0.1)
+        logging.info(f"EntropyBoundedPositionalBiasedConfTopKSampler initialized with num_steps: {self.num_steps}")
+        logging.info(f"lambda_val: {self.lambda_val}")
+        logging.info(f"gamma: {self.gamma}")
+
+    def update(self, current_ids, copy_flag, alpha_t, alpha_s, log_probs, is_last_step=False, **kwargs):
+        p_x0, pred_ids = self.get_pred_ids_and_probs(log_probs)
+
+        masked_flag = ~copy_flag
+        new_ids = current_ids.clone()
+        new_copy_flag = copy_flag.clone()
+
+        pred_conf = torch.gather(p_x0, dim=-1, index=pred_ids.unsqueeze(-1)).squeeze(-1)
+        position_ids = torch.arange(current_ids.shape[1], device=current_ids.device, dtype=pred_conf.dtype)
+        positional_bias = torch.exp(-self.lambda_val * position_ids).unsqueeze(0)
+        biased_conf = pred_conf * positional_bias
+        err = 1.0 - biased_conf
+        err = torch.where(masked_flag, err, torch.full_like(err, float("inf")))
+
+        entropy = torch.distributions.Categorical(probs=p_x0).entropy()
+
+        if is_last_step:
+            new_ids = torch.where(copy_flag, current_ids, pred_ids)
+            new_copy_flag = torch.ones_like(copy_flag, dtype=torch.bool, device=copy_flag.device)
+        else:
+            sorted_err, sorted_idx = torch.sort(err, dim=-1)
+            entropy_sorted = entropy.gather(dim=-1, index=sorted_idx)
+            acc_entropy = torch.cumsum(entropy_sorted, dim=-1)
+            cummax_entropy = torch.cummax(entropy_sorted, dim=-1).values
+
+            num_tokens_per_sample = (acc_entropy - cummax_entropy <= self.gamma).sum(dim=-1)
+            masked_counts = masked_flag.sum(dim=1)
+            num_tokens_per_sample = torch.minimum(num_tokens_per_sample, masked_counts)
+            num_tokens_per_sample = torch.where(
+                masked_counts > 0,
+                torch.clamp(num_tokens_per_sample, min=1),
+                torch.zeros_like(num_tokens_per_sample),
+            )
+
+            k_max = int(num_tokens_per_sample.max().item())
+            topk_indices = sorted_idx[:, :k_max]
+            rank_mask = torch.arange(k_max, device=current_ids.device).unsqueeze(0)
+            select_mask = rank_mask < num_tokens_per_sample.unsqueeze(1)
+
+            batch_idx = torch.arange(current_ids.size(0), device=current_ids.device).unsqueeze(1).expand_as(topk_indices)
+            selected_batches = batch_idx[select_mask]
+            selected_positions = topk_indices[select_mask]
+
+            new_ids[selected_batches, selected_positions] = pred_ids[selected_batches, selected_positions]
+            new_copy_flag[selected_batches, selected_positions] = True
+
+        new_ids, new_copy_flag, new_ids_length = self.update_length(new_ids, new_copy_flag)
+        return new_ids, new_ids_length, new_copy_flag
 
 class ConfTopPSampler(Sampler):
     def __init__(self, config, model):
