@@ -25,6 +25,8 @@ def get_sampler(config, model):
         return EntropyBoundedConfTopKSampler(config, model)
     elif type == 'EB-conf-top-k-pos-biased':
         return EntropyBoundedPositionalBiasedConfTopKSampler(config, model)
+    elif type == 'autoregressive':
+        return AutoRegressiveSampler(config, model)
     elif type == 'conf-top-p':
         return ConfTopPSampler(config, model)
     elif type == 'DFM':
@@ -64,7 +66,7 @@ class Sampler:
             pred_ids = sample_categorical(p_x0, dp=self.use_float64)
 
         return p_x0, pred_ids
-
+    
     def do_nucleus_sampling(self, p_x0):
         if self.p_nucleus < 1:
             sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
@@ -197,19 +199,19 @@ class ConfTopKSampler(Sampler):
                 torch.zeros_like(num_tokens_per_sample),
             )
 
-            # update new_ids and new_state according to the top-k tokens (per sample)
-            k_max = int(num_tokens_per_sample.max().item())
-            if k_max > 0:
-                topk_indices = torch.topk(pred_conf, k=k_max, dim=-1).indices  # [B, k_max]
-                rank_mask = torch.arange(k_max, device=current_ids.device).unsqueeze(0)
-                select_mask = rank_mask < num_tokens_per_sample.unsqueeze(1)  # [B, k_max]
+        # update new_ids and new_state according to the top-k tokens (per sample)
+        k_max = int(num_tokens_per_sample.max().item())
+        if k_max > 0:
+            topk_indices = torch.topk(pred_conf, k=k_max, dim=-1).indices  # [B, k_max]
+            rank_mask = torch.arange(k_max, device=current_ids.device).unsqueeze(0)
+            select_mask = rank_mask < num_tokens_per_sample.unsqueeze(1)  # [B, k_max]
 
-                batch_idx = torch.arange(current_ids.size(0), device=current_ids.device).unsqueeze(1).expand_as(topk_indices)
-                selected_batches = batch_idx[select_mask]
-                selected_positions = topk_indices[select_mask]
+            batch_idx = torch.arange(current_ids.size(0), device=current_ids.device).unsqueeze(1).expand_as(topk_indices)
+            selected_batches = batch_idx[select_mask]
+            selected_positions = topk_indices[select_mask]
 
-                new_ids[selected_batches, selected_positions] = pred_ids[selected_batches, selected_positions]
-                new_copy_flag[selected_batches, selected_positions] = True
+            new_ids[selected_batches, selected_positions] = pred_ids[selected_batches, selected_positions]
+            new_copy_flag[selected_batches, selected_positions] = True
 
         new_ids, new_copy_flag, new_ids_length = self.update_length(new_ids, new_copy_flag)
 
@@ -393,6 +395,34 @@ class EntropyBoundedPositionalBiasedConfTopKSampler(Sampler):
 
         new_ids, new_copy_flag, new_ids_length = self.update_length(new_ids, new_copy_flag)
         return new_ids, new_ids_length, new_copy_flag
+
+
+class AutoRegressiveSampler(Sampler):
+    def __init__(self, config, model):
+        super().__init__(config, model)
+        self.num_steps = 256
+        logging.info(f"AutoRegressiveSampler initialized with num_steps: {self.num_steps}")
+
+    def update(self, current_ids, copy_flag, alpha_t, alpha_s, log_probs, is_last_step=False, **kwargs):
+        p_x0, pred_ids = self.get_pred_ids_and_probs(log_probs)
+        _ = p_x0  # keep return signature uniform with other samplers
+
+        masked_flag = ~copy_flag
+        new_ids = current_ids.clone()
+        new_copy_flag = copy_flag.clone()
+
+        # Decode only one token per sample: the left-most undecoded position.
+        has_masked = masked_flag.any(dim=1)
+        if has_masked.any():
+            first_masked_pos = masked_flag.long().argmax(dim=1)
+            batch_idx = torch.arange(current_ids.size(0), device=current_ids.device)[has_masked]
+            pos_idx = first_masked_pos[has_masked]
+            new_ids[batch_idx, pos_idx] = pred_ids[batch_idx, pos_idx]
+            new_copy_flag[batch_idx, pos_idx] = True
+
+        new_ids, new_copy_flag, new_ids_length = self.update_length(new_ids, new_copy_flag)
+        return new_ids, new_ids_length, new_copy_flag
+
 
 class ConfTopPSampler(Sampler):
     def __init__(self, config, model):
