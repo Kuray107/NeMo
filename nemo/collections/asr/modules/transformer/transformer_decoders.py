@@ -180,6 +180,70 @@ class TransformerDecoderBlock(nn.Module, AttentionAdapterModuleMixin):
             types = self.get_accepted_adapter_types()
         return types
 
+class TransformerDecoderCFGBlock(TransformerDecoderBlock):
+    def forward_preln(self, decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask, num_cfg_samples=0):
+        """
+        Pre-LayerNorm block
+        Order of operations: LN -> Self-Attn -> Residual -> LN -> (Cross-Attn) -> Residual -> LN -> FFN
+        """
+        residual = decoder_query
+        decoder_query = self.layer_norm_1(decoder_query)
+        decoder_keys = self.layer_norm_1(decoder_keys)
+        self_attn_output = self.first_sub_layer(decoder_query, decoder_keys, decoder_keys, decoder_mask)
+        self_attn_output += residual
+
+        if self.is_adapter_available():
+            # Call the MHA adapters
+            pack_input = {
+                'x': self_attn_output,
+                'loc': 'mha',
+                'att_mask': decoder_mask,
+                'pos_emb': None,
+            }
+            pack_input = self.forward_enabled_adapters(pack_input)
+            self_attn_output = pack_input['x']
+
+        # ---- Cross-attention block (with CFG bypass for last 4 samples) ----
+        residual = self_attn_output  # this is the value we want to pass through when skipping cross-attn
+        self_attn_normed = self.layer_norm_2(self_attn_output)
+
+        # Compute regular cross-attention for the whole batch
+        enc_dec_attn_output = self.second_sub_layer(
+            self_attn_normed, encoder_states, encoder_states, encoder_mask
+        )
+        enc_dec_attn_output += residual
+
+        # Classifier-free guidance: bypass cross-attention for last 4 samples
+        batch_size = enc_dec_attn_output.size(0)
+        if num_cfg_samples > 0:
+            # randomly sample which samples to bypass cross-attention for CFG
+            cfg_indices = torch.randperm(batch_size)[-num_cfg_samples:]
+            enc_dec_attn_output[cfg_indices] = residual[cfg_indices]
+            # cfg_start = batch_size - num_cfg_samples
+            # For these samples, ignore cross-attn and just pass self-attn output forward
+            # enc_dec_attn_output[cfg_start:] = residual[cfg_start:]
+
+        residual = enc_dec_attn_output
+        enc_dec_attn_output = self.layer_norm_3(enc_dec_attn_output)
+        output_states = self.third_sub_layer(enc_dec_attn_output)
+        output_states += residual
+
+        if self.is_adapter_available():
+            # Call the Linear adapters
+            pack_input = {
+                'x': output_states,
+                'loc': 'post',
+            }
+            pack_input = self.forward_enabled_adapters(pack_input)
+            output_states = pack_input['x']
+
+        return output_states
+    
+    def forward(self, decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask, num_cfg_samples=0):
+        if self.pre_ln:
+            return self.forward_preln(decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask, num_cfg_samples)
+        else:
+            return self.forward_postln(decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask)
 
 class TransformerDecoder(nn.Module):
     def __init__(
@@ -326,6 +390,94 @@ class TransformerDecoderAdapter(TransformerDecoder, adapter_mixins.AdapterModule
         cfg = adapter_utils.update_adapter_cfg_input_dim(self, cfg, module_dim=self.d_model)
         return cfg
 
+class TransformerDecoderNonCausal(TransformerDecoder):
+    def __init__(
+        self,
+        num_layers: int,
+        hidden_size: int,
+        inner_size: int,
+        num_attention_heads: int = 1,
+        attn_score_dropout: float = 0.0,
+        attn_layer_dropout: float = 0.0,
+        ffn_dropout: float = 0.0,
+        hidden_act: str = "relu",
+        pre_ln: bool = False,
+        pre_ln_final_layer_norm: bool = True,
+    ):
+        super().__init__(
+            num_layers, hidden_size, inner_size, num_attention_heads, attn_score_dropout,
+            attn_layer_dropout, ffn_dropout, hidden_act, pre_ln, pre_ln_final_layer_norm
+        )
+
+        layer = TransformerDecoderCFGBlock(
+            hidden_size,
+            inner_size,
+            num_attention_heads,
+            attn_score_dropout,
+            attn_layer_dropout,
+            ffn_dropout,
+            hidden_act,
+            pre_ln,
+        )
+        self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(num_layers)])
+        self.dianonal = None
+    
+    def forward(
+        self,
+        decoder_states,
+        decoder_mask,
+        encoder_states,
+        encoder_mask,
+        num_cfg_samples=0,
+        decoder_mems_list=None,
+        return_mems=False,
+        return_mems_as_list=True,
+    ):
+        """
+        Args:
+            decoder_states: output of the embedding layer (B x L_dec x H)
+            decoder_mask: decoder inputs mask (B x L_dec)
+            encoder_states: output of the encoder (B x L_enc x H)
+            encoder_mask: encoder inputs mask (B x L_enc)
+            num_cfg_samples: number of samples in batch to perform classifier-free guidance
+            decoder_mems_list: list of the cached decoder hidden states
+                for fast autoregressive generation which will be used instead
+                of decoder_states as keys and values if not None
+            return_mems: bool, whether to return outputs of all decoder layers
+                or the last layer only
+            return_mems_as_list: bool, when True, mems returned are as a list; otherwise mems are Tensor
+        """
+        decoder_attn_mask = form_attention_mask(decoder_mask, diagonal=self.diagonal)
+        encoder_attn_mask = form_attention_mask(encoder_mask)
+        memory_states = self._get_memory_states(decoder_states, decoder_mems_list, 0)
+        if return_mems:
+            if return_mems_as_list:
+                cached_mems_list = [memory_states]
+            else:
+                cached_mems_list = memory_states.unsqueeze(0)
+
+        for i, layer in enumerate(self.layers):
+            decoder_states = layer(decoder_states, decoder_attn_mask, memory_states, encoder_states, encoder_attn_mask, num_cfg_samples)
+            memory_states = self._get_memory_states(decoder_states, decoder_mems_list, i + 1)
+            if return_mems:
+                if return_mems_as_list:
+                    cached_mems_list.append(memory_states)
+                else:
+                    cached_mems_list = torch.cat((cached_mems_list, memory_states.unsqueeze(0)), dim=0)
+
+        if self.final_layer_norm is not None:
+            decoder_states = self.final_layer_norm(decoder_states)
+            memory_states = self._get_memory_states(decoder_states, decoder_mems_list, i + 2)
+            if return_mems:
+                if return_mems_as_list:
+                    cached_mems_list.append(memory_states)
+                else:
+                    cached_mems_list = torch.cat((cached_mems_list, memory_states.unsqueeze(0)), dim=0)
+
+        if return_mems:
+            return cached_mems_list
+        else:
+            return memory_states
 
 """
 Register any additional information

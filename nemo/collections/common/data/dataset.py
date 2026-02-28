@@ -147,6 +147,7 @@ class ConcatDataset(IterableDataset):
                 val = next(self.iterables[ind])
                 if self.kind == 'map':
                     val = self.datasets[ind][val]
+                    val = val + (ind,)
                 yield val
             except StopIteration:
                 self.iterables[ind] = self.get_iterable(self.datasets[ind])

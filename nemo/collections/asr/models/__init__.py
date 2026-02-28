@@ -44,6 +44,7 @@ from nemo.collections.asr.models.ssl_models import (
     SpeechEncDecSelfSupervisedModel,
 )
 from nemo.collections.asr.models.transformer_bpe_models import EncDecTransfModelBPE
+from nemo.collections.asr.models.transformer_ddms_bpe_models import EncDecTransfDDMSModelBPE
 
 __all__ = [
     'ASRModel',
@@ -68,6 +69,7 @@ __all__ = [
     'EncDecRNNTModel',
     'EncDecSpeakerLabelModel',
     'EncDecTransfModelBPE',
+    'EncDecTransfDDMSModelBPE',
     'NeuralDiarizer',
     'SLUIntentSlotBPEModel',
     'SortformerEncLabelModel',

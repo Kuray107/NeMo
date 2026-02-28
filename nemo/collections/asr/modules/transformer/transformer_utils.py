@@ -17,7 +17,7 @@ from typing import Optional, Union
 
 from omegaconf.dictconfig import DictConfig
 
-from nemo.collections.asr.modules.transformer.transformer import TransformerDecoderNM, TransformerEncoderNM
+from nemo.collections.asr.modules.transformer.transformer import TransformerDecoderNM, TransformerEncoderNM, TransformerDecoderDDMSNM
 from nemo.collections.asr.modules.transformer.transformer_bottleneck import TransformerBottleneckEncoderNM
 
 __all__ = ['get_nemo_transformer']
@@ -112,24 +112,43 @@ def get_nemo_transformer(
             )
         else:
             raise ValueError(f"Unknown arch = {arch}")
-    else:
 
-        model = TransformerDecoderNM(
-            vocab_size=cfg.get('vocab_size'),
-            hidden_size=cfg.get('hidden_size'),
-            num_layers=cfg.get('num_layers'),
-            inner_size=cfg.get('inner_size'),
-            max_sequence_length=cfg.get('max_sequence_length', 512),
-            embedding_dropout=cfg.get('embedding_dropout', 0.0),
-            learn_positional_encodings=cfg.get('learn_positional_encodings', False),
-            num_attention_heads=cfg.get('num_attention_heads'),
-            ffn_dropout=cfg.get('ffn_dropout', 0.0),
-            attn_score_dropout=cfg.get('attn_score_dropout', 0.0),
-            attn_layer_dropout=cfg.get('attn_layer_dropout', 0.0),
-            hidden_act=cfg.get('hidden_act', 'relu'),
-            pre_ln=cfg.get('pre_ln', False),
-            pre_ln_final_layer_norm=pre_ln_final_layer_norm,
-            num_token_types=cfg.get('num_token_types', 2),
-        )
+    else:
+        if cfg.get('dec_type') == 'ddms' or cfg.get('dec_type') == 'ddms_ctc':
+            model = TransformerDecoderDDMSNM(
+                vocab_size=cfg.get('vocab_size'),
+                hidden_size=cfg.get('hidden_size'),
+                num_layers=cfg.get('num_layers'),
+                inner_size=cfg.get('inner_size'),
+                max_sequence_length=cfg.get('max_sequence_length', 512),
+                embedding_dropout=cfg.get('embedding_dropout', 0.0),
+                learn_positional_encodings=cfg.get('learn_positional_encodings', False),
+                num_attention_heads=cfg.get('num_attention_heads'),
+                ffn_dropout=cfg.get('ffn_dropout', 0.0),
+                attn_score_dropout=cfg.get('attn_score_dropout', 0.0),
+                attn_layer_dropout=cfg.get('attn_layer_dropout', 0.0),
+                hidden_act=cfg.get('hidden_act', 'relu'),
+                pre_ln=cfg.get('pre_ln', False),
+                pre_ln_final_layer_norm=pre_ln_final_layer_norm,
+                num_token_types=cfg.get('num_token_types', 2),
+            )
+        else:
+            model = TransformerDecoderNM(
+                vocab_size=cfg.get('vocab_size'),
+                hidden_size=cfg.get('hidden_size'),
+                num_layers=cfg.get('num_layers'),
+                inner_size=cfg.get('inner_size'),
+                max_sequence_length=cfg.get('max_sequence_length', 512),
+                embedding_dropout=cfg.get('embedding_dropout', 0.0),
+                learn_positional_encodings=cfg.get('learn_positional_encodings', False),
+                num_attention_heads=cfg.get('num_attention_heads'),
+                ffn_dropout=cfg.get('ffn_dropout', 0.0),
+                attn_score_dropout=cfg.get('attn_score_dropout', 0.0),
+                attn_layer_dropout=cfg.get('attn_layer_dropout', 0.0),
+                hidden_act=cfg.get('hidden_act', 'relu'),
+                pre_ln=cfg.get('pre_ln', False),
+                pre_ln_final_layer_norm=pre_ln_final_layer_norm,
+                num_token_types=cfg.get('num_token_types', 2),
+            )
 
     return model

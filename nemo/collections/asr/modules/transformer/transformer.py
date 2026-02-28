@@ -20,7 +20,7 @@ from omegaconf.omegaconf import MISSING, DictConfig
 
 from nemo.collections.asr.modules.transformer.decoder_module import DecoderModule
 from nemo.collections.asr.modules.transformer.encoder_module import EncoderModule
-from nemo.collections.asr.modules.transformer.transformer_decoders import TransformerDecoder, TransformerDecoderAdapter
+from nemo.collections.asr.modules.transformer.transformer_decoders import TransformerDecoder, TransformerDecoderAdapter, TransformerDecoderNonCausal
 from nemo.collections.asr.modules.transformer.transformer_encoders import TransformerEncoder
 from nemo.collections.asr.modules.transformer.transformer_modules import TransformerEmbedding
 from nemo.collections.asr.parts.utils import adapter_utils
@@ -283,6 +283,40 @@ class TransformerDecoderNM(DecoderModule, Exportable):
             return {"last_hidden_states": NeuralType(('B', 'D', 'T', 'D'), ChannelType())}
         else:
             return {"last_hidden_states": NeuralType(('B', 'T', 'D'), ChannelType())}
+
+
+class TransformerDecoderDDMSNM(TransformerDecoderNM):
+    DECODER_TYPE: type = TransformerDecoderNonCausal
+
+    def forward(
+        self,
+        input_ids,
+        decoder_mask,
+        encoder_embeddings,
+        encoder_mask,
+        decoder_mems=None,
+        num_cfg_samples=0
+    ):
+        start_pos = 0
+        if decoder_mems is not None:
+            start_pos = input_ids.shape[1] - 1
+            input_ids = input_ids[:, -1:]
+            decoder_mask = decoder_mask[:, -1:]
+            decoder_mems = torch.transpose(decoder_mems, 0, 1)
+        decoder_embeddings = self._embedding(input_ids=input_ids, start_pos=start_pos)
+        decoder_hidden_states = self._decoder(
+            decoder_states=decoder_embeddings,
+            decoder_mask=decoder_mask,
+            encoder_states=encoder_embeddings,
+            encoder_mask=encoder_mask,
+            decoder_mems_list=decoder_mems,
+            return_mems=self.return_mems,
+            return_mems_as_list=False,
+            num_cfg_samples=num_cfg_samples
+        )
+        if self.return_mems:
+            decoder_hidden_states = torch.transpose(decoder_hidden_states, 0, 1)
+        return decoder_hidden_states
 
 
 class TransformerDecoderNMAdapter(TransformerDecoderNM, adapter_mixins.AdapterModuleMixin):
